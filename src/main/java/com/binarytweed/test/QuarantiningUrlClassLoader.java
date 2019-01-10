@@ -1,78 +1,65 @@
 package com.binarytweed.test;
 
-import java.net.URLClassLoader;
+import static java.util.Arrays.asList;
+
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
-/**
- * If a class name starts with any of the supplied patterns, it is loaded by 
- * <em>this</em> classloader; otherwise it is loaded by the parent classloader.
- *
- */
-public class QuarantiningUrlClassLoader extends URLClassLoader
-{
+public class QuarantiningUrlClassLoader extends ClassLoader {
 	private static final Logger logger = LoggerFactory.getLogger(QuarantiningUrlClassLoader.class);
-	
-	
 	private final Set<String> quarantinedClassNames;
-	
-	
-	/**
-	 * 
-	 * @param quarantinedClassNames prefixes to match against when deciding how to load a class
-	 */
-	public QuarantiningUrlClassLoader(String... quarantinedClassNames)
-	{
-		super(((URLClassLoader) getSystemClassLoader()).getURLs());
-		logger.trace("[{}] was loaded by [{}]", getClass().getName(), getClass().getClassLoader());
-		
-		this.quarantinedClassNames = new HashSet<>();
-		for(String className : quarantinedClassNames)
-		{
-			this.quarantinedClassNames.add(className);
+
+	public QuarantiningUrlClassLoader(String... quarantinedClassNames) {
+		super(getSystemClassLoader());
+		this.quarantinedClassNames = new HashSet<>(asList(quarantinedClassNames));
+	}
+
+	private boolean shouldLoad(String className) {
+		return !className.equals(getClass().getName()) && !className.endsWith("QuarantiningUrlClassLoader") && quarantine(className);
+	}
+
+	@Override
+	public Class<?> loadClass(String name) throws ClassNotFoundException {
+		if (!shouldLoad(name)) {
+			logger.trace("loading class {} by parent");
+			return super.loadClass(name);
+		}
+		logger.trace("loading class {} in quarantine");
+		return doLoadClass(name);
+	}
+
+	private Class<?> doLoadClass(String name) throws ClassNotFoundException {
+		String internalName = StringUtils.replace(name, ".", "/") + ".class";
+		InputStream is = super.getResourceAsStream(internalName);
+		if (is == null) {
+			throw new ClassNotFoundException(name);
+		}
+		try {
+			byte[] bytes = IOUtils.toByteArray(is);
+			Class<?> cls = defineClass(name, bytes, 0, bytes.length);
+			// Additional check for defining the package, if not defined yet.
+			if (cls.getPackage() == null) {
+				int packageSeparator = name.lastIndexOf('.');
+				if (packageSeparator != -1) {
+					String packageName = name.substring(0, packageSeparator);
+					definePackage(packageName, null, null, null, null, null, null, null);
+				}
+			}
+			return cls;
+		}
+		catch (IOException ex) {
+			throw new ClassNotFoundException("Cannot load resource for class [" + name + "]", ex);
 		}
 	}
 
-
-	/**
-	 * If a class name starts with any of the supplied patterns, it is loaded by 
-	 * <em>this</em> classloader; otherwise it is loaded by the parent classloader.
-	 * 
-	 * @param name class to load
-	 */
-	@Override
-	public Class<?> loadClass(String name) throws ClassNotFoundException
-	{
-		boolean quarantine = false;
-		
-		for(String quarantinedPattern : quarantinedClassNames)
-		{
-			if(name.startsWith(quarantinedPattern))
-			{
-				quarantine = true;
-				break;
-			}
-		}
-		
-		if(quarantine)
-		{
-			logger.debug("Detected quarantined class [{}]", name);
-			try
-			{
-				return findClass(name);
-			}
-			catch (ClassNotFoundException e)
-			{
-				logger.error("Could not load [{}]", name);
-				throw e;
-			}
-		}
-
-		logger.trace("[{}] being loaded by parent", name);
-		return super.loadClass(name);
+	private boolean quarantine(String className) {
+		return quarantinedClassNames.stream().anyMatch(className::startsWith);
 	}
 }
